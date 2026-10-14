@@ -393,7 +393,7 @@ impl ResolvableCell for Packed<GridCell> {
 
 /// Represents an explicit grid line (horizontal or vertical) specified by the
 /// user.
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Line {
     /// The index of the track after this line. This will be the index of the
     /// row a horizontal line is above of, or of the column right after a
@@ -423,7 +423,7 @@ pub struct Line {
 }
 
 /// A repeatable grid header. Starts at the first row.
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Header {
     /// The range of rows included in this header.
     pub range: Range<usize>,
@@ -442,7 +442,7 @@ pub struct Header {
 }
 
 /// A repeatable grid footer. Stops at the last row.
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Footer {
     /// The first row included in this footer.
     pub start: usize,
@@ -467,7 +467,7 @@ impl Footer {
 /// It still exists even when not repeatable, but must not have additional
 /// considerations by grid layout, other than for consistency (such as making
 /// a certain group of rows unbreakable).
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Repeatable<T> {
     inner: T,
 
@@ -568,7 +568,7 @@ pub enum ResolvableGridItem<T: ResolvableCell> {
 }
 
 /// Represents a cell in CellGrid, to be laid out by GridLayouter.
-#[derive(Debug, PartialEq, Hash)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Cell {
     /// The cell's body.
     pub body: Content,
@@ -625,7 +625,7 @@ pub enum LinePosition {
 }
 
 /// A grid entry.
-#[derive(Debug, PartialEq, Hash)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub enum Entry {
     /// An entry which holds a cell.
     Cell(Cell),
@@ -654,7 +654,11 @@ pub enum ResolvableGridChild<T: ResolvableCell, I> {
 }
 
 /// A grid of cells, including the columns, rows, and cell data.
-#[derive(Debug, PartialEq, Hash)]
+///
+/// Cloning preserves the grid structure while sharing cell content and stroke
+/// storage. This supports copy-on-write updates through `Arc::make_mut` without
+/// changing another consumer's cached model.
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct CellGrid {
     /// The grid cells.
     pub entries: Vec<Entry>,
@@ -2417,5 +2421,69 @@ fn skip_auto_index_through_fully_merged_rows(
         {
             *auto_index += columns;
         }
+    }
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+    use crate::visualize::Color;
+
+    #[test]
+    fn shared_cell_grid_can_be_changed_without_mutating_cached_models() {
+        let body = Content::default();
+        let cell = Cell {
+            body: body.clone(),
+            fill: Some(Color::RED.into()),
+            colspan: NonZeroUsize::new(2).unwrap(),
+            rowspan: NonZeroUsize::new(2).unwrap(),
+            stroke: Sides::splat(None),
+            stroke_overridden: Sides::splat(false),
+            breakable: true,
+        };
+        let grid = Arc::new(CellGrid {
+            entries: vec![Entry::Cell(cell), Entry::Merged { parent: 0 }],
+            cols: vec![Sizing::Auto, Sizing::Auto],
+            rows: vec![Sizing::Auto, Sizing::Auto],
+            vlines: vec![vec![Line {
+                index: 0,
+                start: 0,
+                end: None,
+                stroke: None,
+                position: LinePosition::Before,
+            }]],
+            hlines: vec![],
+            headers: vec![Repeatable {
+                inner: Header {
+                    range: 0..1,
+                    level: NonZeroU32::new(1).unwrap(),
+                    short_lived: false,
+                },
+                repeated: true,
+            }],
+            footer: Some(Repeatable {
+                inner: Footer { start: 1, end: 2, level: 1 },
+                repeated: false,
+            }),
+            has_gutter: false,
+        });
+        let mut changed = Arc::clone(&grid);
+        let changed_grid = Arc::make_mut(&mut changed);
+        let Entry::Cell(cell) = &mut changed_grid.entries[0] else {
+            panic!("expected cell")
+        };
+        cell.fill = Some(Color::BLUE.into());
+        assert_eq!(grid.entries[0].as_cell().unwrap().fill, Some(Color::RED.into()));
+        assert_eq!(changed.entries[0].as_cell().unwrap().fill, Some(Color::BLUE.into()));
+        assert_eq!(changed.entries[0].as_cell().unwrap().body, body);
+        assert_eq!(changed.cols, grid.cols);
+        assert_eq!(changed.rows, grid.rows);
+        assert_eq!(changed.headers, grid.headers);
+        assert_eq!(changed.footer, grid.footer);
+        assert_eq!(changed.vlines, grid.vlines);
+        assert_eq!(changed.entries[1], Entry::Merged { parent: 0 });
+        assert_eq!(changed.entries[0].as_cell().unwrap().rowspan.get(), 2);
+        assert_eq!(changed.entries[0].as_cell().unwrap().colspan.get(), 2);
+        assert!(changed.entries[0].as_cell().unwrap().breakable);
     }
 }
