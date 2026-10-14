@@ -698,7 +698,10 @@ mod tests {
     use super::*;
 
     fn translation_files_iter() -> impl Iterator<Item = PathBuf> {
-        std::fs::read_dir("translations")
+        // The downstream standalone manifest lives at the checkout root.
+        let translations = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/typst-library/translations");
+        std::fs::read_dir(translations)
             .unwrap()
             .map(|e| e.unwrap().path())
             .filter(|e| e.is_file() && e.extension().is_some_and(|e| e == "txt"))
